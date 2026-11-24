@@ -1,7 +1,9 @@
-# 提花织带纹版修复 API
+# 提花织带纹版修复 + 裁样 API
 
 根据同系列**参考 PNG** 与用透明像素标注缺损的**残片 PNG**，补出可反复织造的
-重复单元纹版。技术栈：FastAPI + Pillow + OR-Tools CP-SAT（含内置回溯兜底）+ SQLite。
+重复单元纹版；再凭草案编号开**裁样单**，在平铺平面上从成品织带上剪下一朵
+完整的花并保全邻花。技术栈：FastAPI + Pillow + OR-Tools CP-SAT（含内置回溯兜底）
++ SQLite。
 
 ## 目录结构
 
@@ -10,13 +12,15 @@
 ├── app/
 │   ├── images.py    # PNG 解析/校验、周期投影、2×2 图块统计
 │   ├── solver.py    # CP-SAT 可行性 + 局部搜索优化 + 回溯兜底
-│   ├── storage.py   # 草案 SQLite 持久化
+│   ├── cutting.py   # 裁样：跨单元花朵追踪、最小面积矩形、刀位校验
+│   ├── storage.py   # 草案与裁样单 SQLite 持久化
 │   └── main.py      # FastAPI 路由
 ├── tests/
-│   └── test_app.py  # 26 个单元/端到端测试
+│   ├── test_app.py       # 26 个纹版修复单元/端到端测试
+│   └── test_cutting.py   # 28 个裁样单元/端到端测试
 ├── demo/
 │   ├── make_demo_data.py   # 生成演示 PNG
-│   ├── demo_requests.sh    # 可直接运行的 curl 演示
+│   ├── demo_requests.sh    # 可直接运行的 curl 演示（含裁样单）
 │   └── *.png               # 演示图片
 ├── Dockerfile
 ├── docker-compose.yml
@@ -29,11 +33,11 @@
 docker compose up --build -d
 # 健康检查
 curl http://127.0.0.1:8000/health
-# 跑全套演示请求（创建草案、补录、冲突、领取 PNG）
+# 跑全套演示请求（创建草案、补录、冲突、领取 PNG、开裁样单、登记下刀、改刀位）
 bash demo/demo_requests.sh
 ```
 
-SQLite 数据库通过卷挂载持久化在 `./data/drafts.db`。
+SQLite 数据库通过卷挂载持久化在 `./data/drafts.db`（草案与裁样单同库）。
 
 ## 本地运行（无 Docker）
 
@@ -86,6 +90,78 @@ multipart 表单：`reference`（PNG）、`fragment`（PNG）、`unit_w`、`unit
 领取正式纹版 PNG。仅当草案**已证最优**且纹版**符合当前全部色点**时放行，
 否则 `409`。
 
+## 裁样 API
+
+裁样单凭**草案编号**开单，开单时把当时可领取的正式纹版（`grid` 快照）与调色板
+固化进裁样单。之后草案即使补录色点、重新求解，已开的单仍用开单时的纹版。
+
+### 坐标与记号
+
+- 纹版按 `W × H` 无限平铺，格子坐标可为任意整数（含负数），
+  颜色为 `grid[y % H][x % W]`。
+- **花心**是平铺后的格坐标 `(x, y)`，提交时需要它是非底色格。
+- **刀位**是格线坐标：`x = v` 分隔格 `v-1` 与格 `v`；`y = v` 分隔格 `v-1`
+  与格 `v`。裁片矩形的格线为 `left < right`、`top < bottom`，包含的格是
+  `left ≤ x < right`、`top ≤ y < bottom`。
+- 花朵 = 与花心 4 邻接相连的非底色格连通块，**跨单元计算**。
+  若连通块在平铺平面上无限延伸（例如整条竖条纹），返回 `plan_status=infinite`
+  并在 `notice` 单独提示，不给出矩形。
+
+### `POST /api/cut-orders`
+JSON：`draft_id`、`background`（`[r,g,b]` 或 `"r,g,b"`，须在调色板中）、
+`center: {x, y}`、`candidates: {top|bottom|left|right: [格线坐标…]}`。
+
+- 草案必须已证最优且纹版与当前色点一致（否则 `409`）。
+- 每边至多 **12** 个候选刀位，刀位距花心格至多 **32** 格、且必须在花心
+  对应的一侧；四条边都必须给出（可为空数组）。
+- 在所有“包住整朵花”的候选组合里选**面积最小**的矩形；并列时按
+  `(top,left,bottom,right)` 取最小，保证结果确定。
+- 邻花约束：矩形任一边两侧相邻的两个格不能同时为非底色。邻花**整朵**落在
+  裁片内是允许的，只禁止刀线从一朵花中间穿过。
+- 成功返回 `201` 与单号 `order_no`（形如 `CO-000001`）。无可行方案时仍开单，
+  返回 `plan_status=no_plan` 与 `plan_reason`。
+
+### `POST /api/cut-orders/{order_id}/cuts`
+JSON：`edge`（`top|bottom|left|right`），可选 `line`（须等于当前方案在该边的
+刀线）。登记一条**已按方案下刀**的边并重算。重复登记同一边、刀线与方案不符
+均返回 `409`。
+
+### `PATCH /api/cut-orders/{order_id}/candidates`
+JSON：`candidates: {边: [刀位…]}`（可只给部分边，给出即整条替换）。
+修改候选刀位后重算。
+
+- **已切位置永远参与重算**：即使候选刀位被改掉，已登记的边仍用登记时的刀线；
+  已下刀的边不允许再改其候选刀位（`409 edge_already_cut`）。
+- **无解时撤下未执行刀线**：重算无解时，上一版方案里未下刀的边记入
+  `withdrawn`（仅提示），已切位置保留，供下次重算继续使用。
+- 重启或查询（`GET`）沿用已落库的方案，不会因为查询而改写状态。
+
+### `GET /api/cut-orders/{order_id}`
+返回单号、草案编号、开单时纹版快照、底色、花心、四边候选、已切位置、当前方案
+与 `withdrawn`。
+
+### 裁样最小示例
+
+```bash
+# 1) 开单：花心 (2,2)，白底，四边候选刀位
+curl -sS -X POST http://127.0.0.1:8000/api/cut-orders \
+  -H 'Content-Type: application/json' \
+  -d '{"draft_id":3,"background":[245,245,245],
+       "center":{"x":2,"y":2},
+       "candidates":{"top":[0,1,2],"bottom":[4,5,6],
+                     "left":[0,1,2],"right":[4,5,6]}}'
+
+# 2) 登记上边已下刀
+curl -sS -X POST http://127.0.0.1:8000/api/cut-orders/1/cuts \
+  -H 'Content-Type: application/json' -d '{"edge":"top"}'
+
+# 3) 改底部候选刀位（已切的上边仍用 y=2 重算）
+curl -sS -X PATCH http://127.0.0.1:8000/api/cut-orders/1/candidates \
+  -H 'Content-Type: application/json' -d '{"candidates":{"bottom":[5,6]}}'
+```
+
+完整可运行流程见 `bash demo/demo_requests.sh`（第 8～13 步）。
+
 ## 求解器设计（三层）
 
 1. **CP-SAT 精确优化（短预算）**：结构简单/约束多时直接证最优。
@@ -102,3 +178,7 @@ multipart 表单：`reference`（PNG）、`fragment`（PNG）、`unit_w`、`unit
 pip install pytest httpx
 python -m pytest tests/ -v
 ```
+
+`tests/test_app.py` 覆盖纹版修复，`tests/test_cutting.py` 覆盖裁样的花朵追踪
+（含跨单元、无限延伸）、刀位校验、最小面积矩形、邻花约束、开单/登记/改刀位、
+重启保持已切位置、无解撤线与纹版快照隔离。

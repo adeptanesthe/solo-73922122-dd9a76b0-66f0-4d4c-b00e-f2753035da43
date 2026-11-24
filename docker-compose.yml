@@ -6,7 +6,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # 草案 SQLite 持久化到宿主机，容器重建不丢草案
+      # 草案与裁样单 SQLite 同库持久化到宿主机，容器重建不丢单据
       - ./data:/app/data
       # 演示图片只读挂载，便于容器内复现请求
       - ./demo:/app/demo:ro

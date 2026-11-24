@@ -40,6 +40,32 @@ CREATE TABLE IF NOT EXISTS drafts (
     grid TEXT,
     tile_usage TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS cut_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    -- 开单时固定的草案编号与纹版快照；之后草案再变也不影响本单
+    draft_id INTEGER NOT NULL,
+    unit_w INTEGER NOT NULL,
+    unit_h INTEGER NOT NULL,
+    palette TEXT NOT NULL,
+    grid TEXT NOT NULL,
+    background TEXT NOT NULL,
+    center_x INTEGER NOT NULL,
+    center_y INTEGER NOT NULL,
+    -- 四边候选刀位：{"top": [...], ...}
+    candidates TEXT NOT NULL,
+    -- 已下刀的边与刀线：{"top": 0, ...}
+    cuts TEXT NOT NULL,
+    -- 当前方案（无解时为 NULL）与状态
+    plan TEXT,
+    plan_status TEXT NOT NULL,
+    plan_reason TEXT,
+    plan_detail TEXT,
+    -- 最近一次重算中被撤下的未执行刀线
+    withdrawn TEXT NOT NULL DEFAULT '{}'
+);
 """
 
 
@@ -186,6 +212,116 @@ class DraftStore:
             "grid": json.loads(row["grid"]) if row["grid"] else None,
             "tile_usage": json.loads(row["tile_usage"]),
         }
+
+    # ------------------------------------------------------------------ #
+    # 裁样单
+    # ------------------------------------------------------------------ #
+
+    def create_cut_order(
+        self,
+        *,
+        draft_id: int,
+        unit_w: int,
+        unit_h: int,
+        palette: tuple[RGB, ...],
+        grid: tuple[tuple[RGB, ...], ...],
+        background: RGB,
+        center: tuple[int, int],
+        candidates: dict[str, list[int]],
+        cuts: dict[str, int],
+        plan: Optional[dict],
+        plan_status: str,
+        plan_reason: Optional[str],
+        plan_detail: Optional[str],
+    ) -> int:
+        now = time.time()
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO cut_orders (
+                    created_at, updated_at, draft_id, unit_w, unit_h, palette,
+                    grid, background, center_x, center_y, candidates, cuts,
+                    plan, plan_status, plan_reason, plan_detail, withdrawn
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now, now, draft_id, unit_w, unit_h,
+                    json.dumps([list(c) for c in palette]),
+                    self._encode_grid(grid),
+                    json.dumps(list(background)),
+                    center[0], center[1],
+                    _encode_json(candidates),
+                    _encode_json(cuts),
+                    _encode_json(plan),
+                    plan_status, plan_reason, plan_detail,
+                    "{}",
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_cut_order(self, order_id: int) -> Optional[sqlite3.Row]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM cut_orders WHERE id = ?", (order_id,)
+            ).fetchone()
+        return row
+
+    def update_cut_order(
+        self,
+        order_id: int,
+        *,
+        candidates: dict[str, list[int]],
+        cuts: dict[str, int],
+        plan: Optional[dict],
+        plan_status: str,
+        plan_reason: Optional[str],
+        plan_detail: Optional[str],
+        withdrawn: dict[str, int],
+    ) -> None:
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE cut_orders SET
+                    updated_at = ?, candidates = ?, cuts = ?, plan = ?,
+                    plan_status = ?, plan_reason = ?, plan_detail = ?,
+                    withdrawn = ?
+                WHERE id = ?
+                """,
+                (
+                    now, _encode_json(candidates), _encode_json(cuts),
+                    _encode_json(plan), plan_status, plan_reason, plan_detail,
+                    _encode_json(withdrawn), order_id,
+                ),
+            )
+            self._conn.commit()
+
+    @staticmethod
+    def cut_order_to_dict(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "draft_id": row["draft_id"],
+            "unit_w": row["unit_w"],
+            "unit_h": row["unit_h"],
+            "palette": json.loads(row["palette"]),
+            "grid": DraftStore.decode_grid(row["grid"]),
+            "background": tuple(json.loads(row["background"])),
+            "center": {"x": row["center_x"], "y": row["center_y"]},
+            "candidates": json.loads(row["candidates"]),
+            "cuts": json.loads(row["cuts"]),
+            "plan": json.loads(row["plan"]) if row["plan"] else None,
+            "plan_status": row["plan_status"],
+            "plan_reason": row["plan_reason"],
+            "plan_detail": row["plan_detail"],
+            "withdrawn": json.loads(row["withdrawn"]),
+        }
+
+
+def _encode_json(value) -> str:
+    return json.dumps(value, separators=(",", ":"))
 
 
 def _status_label(status: str) -> str:

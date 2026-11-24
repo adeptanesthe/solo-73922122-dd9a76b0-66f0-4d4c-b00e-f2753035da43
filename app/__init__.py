@@ -1,3 +1,3 @@
-"""提花织带纹版修复 API。"""
+"""提花织带纹版修复与裁样 API。"""
 
-__all__ = ["images", "solver", "storage", "main"]
+__all__ = ["images", "solver", "cutting", "storage", "main"]

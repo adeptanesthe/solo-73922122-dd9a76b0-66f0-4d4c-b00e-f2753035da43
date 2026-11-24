@@ -8,6 +8,8 @@
 * ``fragment_checker.png``   棋盘格残片
 * ``reference_conflict.png`` 6×6 参考图，用于制造同格异色冲突
 * ``fragment_conflict.png``  周期投影后同格异色的残片
+* ``reference_cut.png``      8×8 白底上两朵花（裁样演示，可开裁样单）
+* ``fragment_cut.png``       完整保留两朵花的残片（草案可证最优）
 
 直接执行：``python demo/make_demo_data.py``
 """
@@ -22,6 +24,7 @@ from PIL import Image
 
 OUT_DIR = Path(__file__).resolve().parent
 
+WHITE = (245, 245, 245, 255)
 RED = (220, 60, 60, 255)
 BLUE = (60, 90, 220, 255)
 GREEN = (60, 180, 90, 255)
@@ -91,6 +94,30 @@ def conflict_artifacts(size: int = 6) -> tuple[Image.Image, Image.Image]:
     return ref, frag
 
 
+def cut_reference(size: int = 8) -> Image.Image:
+    """白底上两朵 2×2 的花：唯一可行近似，草案容易证最优。"""
+    img = Image.new("RGBA", (size, size), WHITE)
+    for y in (2, 3):
+        for x in (2, 3):
+            img.putpixel((x, y), RED)
+    for y in (5, 6):
+        for x in (6, 7):
+            img.putpixel((x, y), BLUE)
+    return img
+
+
+def cut_fragment(size: int = 8) -> Image.Image:
+    """完整保留两朵花，其余透明；用固定色点把纹版锚定到参考图。"""
+    img = Image.new("RGBA", (size, size), TRANSPARENT)
+    for y in (2, 3):
+        for x in (2, 3):
+            img.putpixel((x, y), RED)
+    for y in (5, 6):
+        for x in (6, 7):
+            img.putpixel((x, y), BLUE)
+    return img
+
+
 def main() -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
     artifacts = [
@@ -102,6 +129,8 @@ def main() -> None:
     ref_conflict, frag_conflict = conflict_artifacts()
     artifacts.append((ref_conflict, "reference_conflict.png"))
     artifacts.append((frag_conflict, "fragment_conflict.png"))
+    artifacts.append((cut_reference(), "reference_cut.png"))
+    artifacts.append((cut_fragment(), "fragment_cut.png"))
 
     for img, name in artifacts:
         path = save(img, name)
